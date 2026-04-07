@@ -1,56 +1,49 @@
-# inventory_postgresql_db (MongoDB)
+# inventory_postgresql_db (PostgreSQL)
 
-Despite the container name, this database container runs **MongoDB** (per `startup.sh`).
+This database container runs **PostgreSQL** (despite having previously been MongoDB).
 
 ## Stable connection details for backend
 
-The backend should connect using the following environment variables (these are the DB env vars exported by this container runtime):
+The backend should connect using the following environment variables (exported by this container runtime):
 
-- `MONGODB_URL` = `mongodb://appuser:dbuser123@localhost:5000/?authSource=admin`
-- `MONGODB_DB` = `myapp`
+- `POSTGRES_HOST` = `localhost`
+- `POSTGRES_PORT` = `5432`
+- `POSTGRES_DB` = `myapp`
+- `POSTGRES_USER` = `appuser`
+- `POSTGRES_PASSWORD` = `dbuser123`
 
-A shell connection helper is also written to:
+A shell connection helper is written to:
 
-- `db_connection.txt` (contains a `mongosh ...` command)
+- `db_connection.txt` (contains a `psql postgresql://...` command)
 
-## Collections and indexes
+## Schema
 
-On startup, `init_seed.sh` ensures these collections exist and creates indexes:
+On startup, this container ensures tables exist (idempotent):
 
-- `roles`
-  - unique index: `name`
 - `users`
-  - unique index: `email`
-  - indexes: `roleIds`, `isActive`
 - `assets`
-  - unique (sparse) indexes: `assetTag`, `serialNumber`, `barcode`
-  - indexes: `status`, `assignedToUserId`
-- `transfers`
-  - indexes: `assetId+createdAt`, `fromUserId+createdAt`, `toUserId+createdAt`, `status+createdAt`
-- `audit_logs`
-  - indexes: `createdAt`, `actorUserId+createdAt`, `entityType+entityId+createdAt`, `action+createdAt`
+- `allocations`
+- `audits`
 
 ## Seed data (bootstrap admin)
 
-`init_seed.sh` also ensures:
-
-- role `admin` exists (permissions `["*"]`)
-- role `user` exists
-- at least one admin user exists
+On startup, the container ensures at least one admin user exists.
 
 Default seed admin user:
 
+- Username: `admin`
 - Email: `admin@example.com`
 - Password: `ChangeMe123!`
-- Display name: `System Admin`
+- Full name: `System Admin`
 
-You can override seed values via environment variables when running `init_seed.sh`:
+You can override seed values via environment variables:
 
+- `SEED_ADMIN_USERNAME`
 - `SEED_ADMIN_EMAIL`
 - `SEED_ADMIN_PASSWORD`
-- `SEED_ADMIN_DISPLAY_NAME`
+- `SEED_ADMIN_FULL_NAME`
 
 ## Notes
 
-- Password hashing/enforcement should be handled in the backend (this container seeds a minimal bootstrap user).
-- The scripts are written to be idempotent and safe to re-run.
+- Password hashing should be handled in the backend. The container seeds a minimal bootstrap user.
+- Scripts are designed to be idempotent and safe to re-run.

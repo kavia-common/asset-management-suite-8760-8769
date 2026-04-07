@@ -1,150 +1,67 @@
 #!/bin/bash
+set -euo pipefail
 
-# MongoDB startup script following the same pattern
-DB_NAME="myapp"
-DB_USER="appuser"
-DB_PASSWORD="dbuser123"
-DB_PORT="5000"
+DB_NAME="${POSTGRES_DB:-myapp}"
+DB_USER="${POSTGRES_USER:-appuser}"
+DB_PASSWORD="${POSTGRES_PASSWORD:-dbuser123}"
+DB_PORT="${POSTGRES_PORT:-5432}"
+DB_HOST="${POSTGRES_HOST:-127.0.0.1}"
 
-echo "Starting MongoDB setup..."
+echo "Starting PostgreSQL setup..."
+echo " - DB: ${DB_NAME}"
+echo " - User: ${DB_USER}"
+echo " - Host: ${DB_HOST}"
+echo " - Port: ${DB_PORT}"
 
-# Check if MongoDB is already running
-if mongosh --port ${DB_PORT} --eval "db.adminCommand('ping')" > /dev/null 2>&1; then
-    echo "MongoDB is already running on port ${DB_PORT}!"
-    
-    # Try to verify the database exists and user can connect
-    if mongosh mongodb://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}?authSource=admin --eval "db.getName()" > /dev/null 2>&1; then
-        echo "Database ${DB_NAME} is accessible with user ${DB_USER}."
-    else
-        echo "MongoDB is running but authentication might not be configured."
-    fi
-
-    echo "Ensuring collections/indexes/seed data..."
-    DB_NAME="${DB_NAME}" DB_USER="${DB_USER}" DB_PASSWORD="${DB_PASSWORD}" DB_PORT="${DB_PORT}" ./init_seed.sh || true
-    
-    echo ""
-    echo "Database: ${DB_NAME}"
-    echo "Admin user: ${DB_USER} (password: ${DB_PASSWORD})"
-    echo "App user: appuser (password: ${DB_PASSWORD})"
-    echo "Port: ${DB_PORT}"
-    echo ""
-    
-    # Check if connection info file exists
-    if [ -f "db_connection.txt" ]; then
-        echo "To connect to the database, use:"
-        echo "$(cat db_connection.txt)"
-    else
-        echo "To connect to the database, use:"
-        echo "mongosh mongodb://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}?authSource=admin"
-    fi
-
-    echo ""
-    echo "Script completed - MongoDB server already running."
-    exit 0
+# Ensure postgres is running (best-effort; environment may already have it).
+if ! sudo -u postgres pg_isready -h "${DB_HOST}" -p "${DB_PORT}" >/dev/null 2>&1; then
+  echo "PostgreSQL not ready; attempting to start service..."
+  # Try common start commands; ignore failures if service mgmt is not available.
+  (sudo service postgresql start >/dev/null 2>&1) || true
+  (sudo systemctl start postgresql >/dev/null 2>&1) || true
 fi
 
-# Check if MongoDB is running on a different port
-if pgrep -x mongod > /dev/null; then
-    # Get the port of the running MongoDB instance
-    MONGO_PID=$(pgrep -x mongod)
-    CURRENT_PORT=$(sudo lsof -Pan -p $MONGO_PID -i | grep -o ":[0-9]*" | grep -o "[0-9]*" | head -1)
-    
-    if [ "$CURRENT_PORT" = "${DB_PORT}" ]; then
-        echo "MongoDB is already running on port ${DB_PORT}!"
-        echo "Script stopped - server already running."
-        exit 0
-    else
-        echo "MongoDB is running on different port ($CURRENT_PORT), stopping it..."
-        sudo pkill -x mongod
-        sleep 2
-    fi
-fi
-
-# Clean up any existing socket files
-sudo rm -f /tmp/mongodb-*.sock 2>/dev/null
-
-# Start MongoDB server without authentication initially using nohup
-echo "Starting MongoDB server..."
-nohup sudo mongod --dbpath /var/lib/mongodb --port ${DB_PORT} --bind_ip 127.0.0.1 --unixSocketPrefix /var/run/mongodb > /var/lib/mongodb/mongod.log 2>&1 &
-
-# Wait for MongoDB to start
-echo "Waiting for MongoDB to start..."
-sleep 5
-
-# Check if MongoDB is running
-for i in {1..15}; do
-    if mongosh --port ${DB_PORT} --eval "db.adminCommand('ping')" > /dev/null 2>&1; then
-        echo "MongoDB is ready!"
-        break
-    fi
-    echo "Waiting... ($i/15)"
-    sleep 2
+# Wait for readiness
+for i in {1..20}; do
+  if sudo -u postgres pg_isready -h "${DB_HOST}" -p "${DB_PORT}" >/dev/null 2>&1; then
+    echo "PostgreSQL is ready!"
+    break
+  fi
+  echo "Waiting for PostgreSQL... ($i/20)"
+  sleep 1
 done
 
-# Create database and user
-echo "Setting up database and user..."
-mongosh --port ${DB_PORT} << EOF
-// Switch to admin database for user creation
-use admin
+if ! sudo -u postgres pg_isready -h "${DB_HOST}" -p "${DB_PORT}" >/dev/null 2>&1; then
+  echo "ERROR: PostgreSQL is not ready on ${DB_HOST}:${DB_PORT}"
+  exit 1
+fi
 
-// Create admin user if it doesn't exist
-if (db.getUser("${DB_USER}") == null) {
-    db.createUser({
-        user: "${DB_USER}",
-        pwd: "${DB_PASSWORD}",
-        roles: [
-            { role: "userAdminAnyDatabase", db: "admin" },
-            { role: "readWriteAnyDatabase", db: "admin" }
-        ]
-    });
-}
+# Create role (user) and database if missing.
+# Note: we use DO blocks so it's still a single statement per -c execution.
+sudo -u postgres psql -h "${DB_HOST}" -p "${DB_PORT}" -d postgres -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${DB_USER}') THEN CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASSWORD}'; END IF; END \$\$;"
+sudo -u postgres psql -h "${DB_HOST}" -p "${DB_PORT}" -d postgres -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_database WHERE datname = '${DB_NAME}') THEN CREATE DATABASE ${DB_NAME} OWNER ${DB_USER}; END IF; END \$\$;"
 
-// Switch to target database
-use ${DB_NAME}
+# Ensure schema + seed (idempotent)
+POSTGRES_HOST="${DB_HOST}" POSTGRES_PORT="${DB_PORT}" POSTGRES_DB="${DB_NAME}" POSTGRES_USER="${DB_USER}" POSTGRES_PASSWORD="${DB_PASSWORD}" ./init_seed.sh || true
 
-// Create application user for specific database
-if (db.getUser("appuser") == null) {
-    db.createUser({
-        user: "appuser",
-        pwd: "${DB_PASSWORD}",
-        roles: [
-            { role: "readWrite", db: "${DB_NAME}" }
-        ]
-    });
-}
-
-print("MongoDB setup complete!");
-EOF
-
-# Initialize collections/indexes and seed baseline data (idempotent)
-echo "Initializing collections/indexes and seeding baseline data..."
-DB_NAME="${DB_NAME}" DB_USER="${DB_USER}" DB_PASSWORD="${DB_PASSWORD}" DB_PORT="${DB_PORT}" ./init_seed.sh || true
-
-# Save connection command to a file
-echo "mongosh mongodb://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}?authSource=admin" > db_connection.txt
+# Save connection command
+echo "psql postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}" > db_connection.txt
 echo "Connection string saved to db_connection.txt"
 
-# Save environment variables to a file
-cat > db_visualizer/mongodb.env << EOF
-export MONGODB_URL="mongodb://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/?authSource=admin"
-export MONGODB_DB="${DB_NAME}"
+# Save environment variables for Node.js DB viewer
+cat > db_visualizer/postgres.env << EOF
+export POSTGRES_HOST="${DB_HOST}"
+export POSTGRES_PORT="${DB_PORT}"
+export POSTGRES_DB="${DB_NAME}"
+export POSTGRES_USER="${DB_USER}"
+export POSTGRES_PASSWORD="${DB_PASSWORD}"
+export POSTGRES_URL="postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
 EOF
 
-echo "MongoDB setup complete!"
-echo "Database: ${DB_NAME}"
-echo "Admin user: ${DB_USER} (password: ${DB_PASSWORD})"
-echo "App user: appuser (password: ${DB_PASSWORD})"
-echo "Port: ${DB_PORT}"
+echo "PostgreSQL setup complete!"
 echo ""
-
-echo "Environment variables saved to db_visualizer/mongodb.env"
-echo "To use with Node.js viewer, run: source db_visualizer/mongodb.env"
-
-echo "To connect to the database, use one of the following commands:"
-echo "mongosh -u ${DB_USER} -p ${DB_PASSWORD} --port ${DB_PORT} --authenticationDatabase admin ${DB_NAME}"
-echo "$(cat db_connection.txt)"
-
-# MongoDB continues running in background
+echo "Environment variables saved to db_visualizer/postgres.env"
+echo "To use with Node.js viewer, run: source db_visualizer/postgres.env"
 echo ""
-echo "MongoDB is running in the background."
-echo "You can now start your application."
+echo "To connect:"
+cat db_connection.txt

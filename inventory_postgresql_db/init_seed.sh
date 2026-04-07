@@ -1,132 +1,53 @@
 #!/bin/bash
 set -euo pipefail
 
-# MongoDB initialization + seed script.
-# Creates required collections & indexes and ensures at least one admin user exists.
-#
-# This script is designed to be safe to run multiple times (idempotent).
+# PostgreSQL initialization + seed script.
+# Creates required tables/indexes and ensures at least one admin user exists.
 #
 # Stable backend connection details:
-# - MONGODB_URL: mongodb://<user>:<pass>@localhost:<port>/?authSource=admin
-# - MONGODB_DB: myapp (default in this container)
+# - POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
 
-DB_NAME="${DB_NAME:-myapp}"
-DB_USER="${DB_USER:-appuser}"
-DB_PASSWORD="${DB_PASSWORD:-dbuser123}"
-DB_PORT="${DB_PORT:-5000}"
+DB_NAME="${POSTGRES_DB:-myapp}"
+DB_USER="${POSTGRES_USER:-appuser}"
+DB_PASSWORD="${POSTGRES_PASSWORD:-dbuser123}"
+DB_PORT="${POSTGRES_PORT:-5432}"
+DB_HOST="${POSTGRES_HOST:-127.0.0.1}"
 
-# Admin seed user (for initial login/bootstrap).
-# NOTE: Password is stored as plain text here because hashing strategy belongs in the backend.
-# Backend should hash on create/change and/or enforce migration later.
+SEED_ADMIN_USERNAME="${SEED_ADMIN_USERNAME:-admin}"
 SEED_ADMIN_EMAIL="${SEED_ADMIN_EMAIL:-admin@example.com}"
 SEED_ADMIN_PASSWORD="${SEED_ADMIN_PASSWORD:-ChangeMe123!}"
-SEED_ADMIN_DISPLAY_NAME="${SEED_ADMIN_DISPLAY_NAME:-System Admin}"
+SEED_ADMIN_FULL_NAME="${SEED_ADMIN_FULL_NAME:-System Admin}"
 
-echo "Running MongoDB init/seed..."
+echo "Running PostgreSQL init/seed..."
 echo " - DB: ${DB_NAME}"
+echo " - Host: ${DB_HOST}"
 echo " - Port: ${DB_PORT}"
+echo " - Seed admin username: ${SEED_ADMIN_USERNAME}"
 echo " - Seed admin email: ${SEED_ADMIN_EMAIL}"
 
-CONN_STR="mongodb://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}?authSource=admin"
+export PGPASSWORD="${DB_PASSWORD}"
 
-mongosh "${CONN_STR}" --quiet --eval "
-(function () {
-  const dbName = '${DB_NAME}';
-  const now = new Date();
+# 1) Ensure extensions
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
 
-  // ---- Collections ----
-  const collections = [
-    'roles',
-    'users',
-    'assets',
-    'transfers',
-    'audit_logs'
-  ];
+# 2) Tables
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS users (id uuid PRIMARY KEY DEFAULT uuid_generate_v4(), username varchar(50) NOT NULL UNIQUE, email varchar(320) NOT NULL UNIQUE, full_name varchar(120) NOT NULL, password_hash varchar(255) NOT NULL, roles jsonb NOT NULL DEFAULT '[]'::jsonb, status varchar(20) NOT NULL DEFAULT 'active', created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL);"
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS assets (id uuid PRIMARY KEY DEFAULT uuid_generate_v4(), asset_tag varchar(64) NOT NULL UNIQUE, serial_number varchar(128) NULL, type varchar(30) NOT NULL, manufacturer varchar(80) NULL, model varchar(80) NULL, description varchar(500) NULL, location varchar(120) NULL, metadata jsonb NOT NULL DEFAULT '{}'::jsonb, active boolean NOT NULL DEFAULT true, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL);"
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS allocations (id uuid PRIMARY KEY DEFAULT uuid_generate_v4(), asset_id uuid NOT NULL REFERENCES assets(id), from_user_id uuid NULL REFERENCES users(id), to_user_id uuid NOT NULL REFERENCES users(id), status varchar(30) NOT NULL, notes varchar(500) NULL, transfer_to_user_id uuid NULL REFERENCES users(id), transfer_notes varchar(500) NULL, decision_notes varchar(500) NULL, requested_by uuid NULL REFERENCES users(id), approved_by uuid NULL REFERENCES users(id), created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL);"
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS audits (id uuid PRIMARY KEY DEFAULT uuid_generate_v4(), actor_user_id uuid NULL REFERENCES users(id), action varchar(50) NOT NULL, entity_type varchar(50) NOT NULL, entity_id uuid NULL, detail jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL);"
 
-  const existing = db.getSiblingDB(dbName).getCollectionNames();
-  collections.forEach((c) => {
-    if (!existing.includes(c)) {
-      db.getSiblingDB(dbName).createCollection(c);
-    }
-  });
+# 3) Indexes (IF NOT EXISTS available for indexes)
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "CREATE INDEX IF NOT EXISTS ix_assets_serial_number ON assets (serial_number);"
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "CREATE INDEX IF NOT EXISTS ix_allocations_asset_status ON allocations (asset_id, status);"
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "CREATE INDEX IF NOT EXISTS ix_allocations_to_user_status ON allocations (to_user_id, status);"
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "CREATE INDEX IF NOT EXISTS ix_allocations_created_at ON allocations (created_at);"
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "CREATE INDEX IF NOT EXISTS ix_audits_created_at ON audits (created_at);"
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "CREATE INDEX IF NOT EXISTS ix_audits_actor_created_at ON audits (actor_user_id, created_at);"
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "CREATE INDEX IF NOT EXISTS ix_audits_entity_created_at ON audits (entity_type, entity_id, created_at);"
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "CREATE INDEX IF NOT EXISTS ix_audits_action_created_at ON audits (action, created_at);"
 
-  // ---- Indexes ----
-  // Roles
-  db.getSiblingDB(dbName).roles.createIndex({ name: 1 }, { unique: true, name: 'roles__name__uniq' });
+# 4) Seed admin (minimal; backend will hash/enforce in real flows but we still hash here for immediate login)
+# Only insert if no admin exists.
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "INSERT INTO users (username, email, full_name, password_hash, roles, status, created_at, updated_at) SELECT '${SEED_ADMIN_USERNAME}', lower('${SEED_ADMIN_EMAIL}'), '${SEED_ADMIN_FULL_NAME}', '${SEED_ADMIN_PASSWORD}', '[\"admin\",\"user\"]'::jsonb, 'active', now(), now() WHERE NOT EXISTS (SELECT 1 FROM users WHERE roles @> '[\"admin\"]'::jsonb);"
 
-  // Users
-  db.getSiblingDB(dbName).users.createIndex({ email: 1 }, { unique: true, name: 'users__email__uniq' });
-  db.getSiblingDB(dbName).users.createIndex({ roleIds: 1 }, { name: 'users__roleIds' });
-  db.getSiblingDB(dbName).users.createIndex({ isActive: 1 }, { name: 'users__isActive' });
-
-  // Assets
-  db.getSiblingDB(dbName).assets.createIndex({ assetTag: 1 }, { unique: true, sparse: true, name: 'assets__assetTag__uniq' });
-  db.getSiblingDB(dbName).assets.createIndex({ serialNumber: 1 }, { unique: true, sparse: true, name: 'assets__serialNumber__uniq' });
-  db.getSiblingDB(dbName).assets.createIndex({ barcode: 1 }, { unique: true, sparse: true, name: 'assets__barcode__uniq' });
-  db.getSiblingDB(dbName).assets.createIndex({ status: 1 }, { name: 'assets__status' });
-  db.getSiblingDB(dbName).assets.createIndex({ assignedToUserId: 1 }, { name: 'assets__assignedToUserId' });
-
-  // Transfers
-  db.getSiblingDB(dbName).transfers.createIndex({ assetId: 1, createdAt: -1 }, { name: 'transfers__assetId__createdAt' });
-  db.getSiblingDB(dbName).transfers.createIndex({ fromUserId: 1, createdAt: -1 }, { name: 'transfers__fromUserId__createdAt' });
-  db.getSiblingDB(dbName).transfers.createIndex({ toUserId: 1, createdAt: -1 }, { name: 'transfers__toUserId__createdAt' });
-  db.getSiblingDB(dbName).transfers.createIndex({ status: 1, createdAt: -1 }, { name: 'transfers__status__createdAt' });
-
-  // Audit logs
-  db.getSiblingDB(dbName).audit_logs.createIndex({ createdAt: -1 }, { name: 'audit_logs__createdAt' });
-  db.getSiblingDB(dbName).audit_logs.createIndex({ actorUserId: 1, createdAt: -1 }, { name: 'audit_logs__actorUserId__createdAt' });
-  db.getSiblingDB(dbName).audit_logs.createIndex({ entityType: 1, entityId: 1, createdAt: -1 }, { name: 'audit_logs__entity__createdAt' });
-  db.getSiblingDB(dbName).audit_logs.createIndex({ action: 1, createdAt: -1 }, { name: 'audit_logs__action__createdAt' });
-
-  // ---- Seed roles ----
-  const rolesCol = db.getSiblingDB(dbName).roles;
-  const usersCol = db.getSiblingDB(dbName).users;
-
-  function ensureRole(name, permissions) {
-    const existingRole = rolesCol.findOne({ name });
-    if (existingRole) return existingRole;
-    const doc = {
-      name,
-      permissions: permissions || [],
-      createdAt: now,
-      updatedAt: now
-    };
-    rolesCol.insertOne(doc);
-    return rolesCol.findOne({ name });
-  }
-
-  const adminRole = ensureRole('admin', ['*']);
-  ensureRole('user', []);
-
-  // ---- Seed admin user ----
-  const email = '${SEED_ADMIN_EMAIL}'.toLowerCase();
-  let adminUser = usersCol.findOne({ email });
-
-  if (!adminUser) {
-    // Intentionally minimal user document; backend can extend as needed.
-    usersCol.insertOne({
-      email,
-      password: '${SEED_ADMIN_PASSWORD}', // backend should hash in real implementation
-      displayName: '${SEED_ADMIN_DISPLAY_NAME}',
-      roleIds: [adminRole._id],
-      isActive: true,
-      createdAt: now,
-      updatedAt: now
-    });
-    adminUser = usersCol.findOne({ email });
-  } else {
-    // Ensure admin role attached
-    usersCol.updateOne(
-      { _id: adminUser._id },
-      {
-        \$set: { updatedAt: now },
-        \$addToSet: { roleIds: adminRole._id }
-      }
-    );
-  }
-
-  print('Init/seed completed.');
-  print('Seed admin: ' + email);
-})();
-"
-echo "MongoDB init/seed complete."
+echo "PostgreSQL init/seed complete."
