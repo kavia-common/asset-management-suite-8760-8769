@@ -18,6 +18,9 @@ if mongosh --port ${DB_PORT} --eval "db.adminCommand('ping')" > /dev/null 2>&1; 
     else
         echo "MongoDB is running but authentication might not be configured."
     fi
+
+    echo "Ensuring collections/indexes/seed data..."
+    DB_NAME="${DB_NAME}" DB_USER="${DB_USER}" DB_PASSWORD="${DB_PASSWORD}" DB_PORT="${DB_PORT}" ./init_seed.sh || true
     
     echo ""
     echo "Database: ${DB_NAME}"
@@ -34,9 +37,9 @@ if mongosh --port ${DB_PORT} --eval "db.adminCommand('ping')" > /dev/null 2>&1; 
         echo "To connect to the database, use:"
         echo "mongosh mongodb://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}?authSource=admin"
     fi
-    
+
     echo ""
-    echo "Script stopped - MongoDB server already running."
+    echo "Script completed - MongoDB server already running."
     exit 0
 fi
 
@@ -112,6 +115,10 @@ if (db.getUser("appuser") == null) {
 
 print("MongoDB setup complete!");
 EOF
+
+# Initialize collections/indexes and seed baseline data (idempotent)
+echo "Initializing collections/indexes and seeding baseline data..."
+DB_NAME="${DB_NAME}" DB_USER="${DB_USER}" DB_PASSWORD="${DB_PASSWORD}" DB_PORT="${DB_PORT}" ./init_seed.sh || true
 
 # Save connection command to a file
 echo "mongosh mongodb://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}?authSource=admin" > db_connection.txt
